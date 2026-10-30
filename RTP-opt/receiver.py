@@ -22,36 +22,36 @@ s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.bind((ip, port))
 out = sys.stdout.buffer
 
-expected = None     # gói DATA tiếp theo cần nhận (None = chưa có kết nối)
-buf = {}            # gói đến sớm (sai thứ tự), lưu tạm
+expected = None     
+buf = {}            
 
 while True:
     raw, addr = s.recvfrom(2048)
     h, data, ok = parse(raw)
-    if not ok:                          # checksum sai: bỏ, không ACK
+    if not ok:                         
         continue
 
-    if h.type == 0:                     # START
-        if expected is None:            # chưa có kết nối thì mở kết nối mới
+    if h.type == 0:                     
+        if expected is None:            
             expected = 1
-        if expected == 1:               # START trùng/lặp lúc chưa nhận DATA: ACK lại
+        if expected == 1:               
             s.sendto(make_pkt(3, 1), addr)
-        # đang giữa kết nối (expected > 1) thì bỏ qua START
+        
 
     elif expected is None:
         continue
 
-    elif h.type == 2:                   # DATA
-        if h.seq_num >= expected + W:   # ngoài cửa sổ: bỏ
+    elif h.type == 2:                   
+        if h.seq_num >= expected + W:   
             continue
         if h.seq_num >= expected:
             buf[h.seq_num] = data
-        while expected in buf:          # ghi ra các gói liên tiếp
+        while expected in buf:         
             out.write(buf.pop(expected))
             expected += 1
-        s.sendto(make_pkt(3, h.seq_num), addr)  # ACK riêng từng gói
+        s.sendto(make_pkt(3, h.seq_num), addr)  
 
-    elif h.type == 1 and h.seq_num == expected:  # END
+    elif h.type == 1 and h.seq_num == expected:  
         s.sendto(make_pkt(3, h.seq_num), addr)
         break
 
