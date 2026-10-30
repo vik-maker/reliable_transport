@@ -33,7 +33,7 @@ def recv_ack(s, deadline):
         except socket.timeout:
             return None
         h, _, ok = parse(raw)
-        if ok and h.type == 3:     # chỉ nhận ACK đúng checksum
+        if ok and h.type == 3:     
             return h
 
 
