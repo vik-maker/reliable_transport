@@ -1,33 +1,77 @@
-import argparse
-import socket
-
+import sys, socket, time
 from utils import PacketHeader, compute_checksum
 
-
-def sender(receiver_ip, receiver_port, window_size):
-    """TODO: Open socket and send message from sys.stdin."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    pkt_header = PacketHeader(type=2, seq_num=10, length=14)
-    pkt_header.checksum = compute_checksum(pkt_header / "Hello, world!\n")
-    pkt = pkt_header / "Hello, world!\n"
-    s.sendto(bytes(pkt), (receiver_ip, receiver_port))
+ip, port, W = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+addr = (ip, port)
+CHUNK = 1456      # 1472 - 16 byte header
+TIMEOUT = 0.5     # 500 ms
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "receiver_ip", help="The IP address of the host that receiver is running on"
-    )
-    parser.add_argument(
-        "receiver_port", type=int, help="The port number on which receiver is listening"
-    )
-    parser.add_argument(
-        "window_size", type=int, help="Maximum number of outstanding packets"
-    )
-    args = parser.parse_args()
-
-    sender(args.receiver_ip, args.receiver_port, args.window_size)
+def make_pkt(t, seq, data=b""):
+    h = PacketHeader(type=t, seq_num=seq, length=len(data))
+    h.checksum = compute_checksum(h / data)
+    return bytes(h / data)
 
 
-if __name__ == "__main__":
-    main()
+def parse(raw):
+    h = PacketHeader(raw[:16])
+    data = raw[16:16 + h.length]
+    c = h.checksum
+    h2 = PacketHeader(type=h.type, seq_num=h.seq_num, length=h.length, checksum=0)
+    return h, data, compute_checksum(h2 / data) == c
+
+
+def recv_ack(s, deadline):
+    """Chờ ACK đến hạn deadline. Hết giờ thì trả về None."""
+    while True:
+        left = deadline - time.time()
+        if left <= 0:
+            return None
+        s.settimeout(left)
+        try:
+            raw, _ = s.recvfrom(2048)
+        except socket.timeout:
+            return None
+        h, _, ok = parse(raw)
+        if ok and h.type == 3:     # chỉ nhận ACK đúng checksum
+            return h
+
+
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+# 1. Cắt dữ liệu thành các gói (seq của DATA bắt đầu từ 1)
+msg = sys.stdin.buffer.read()
+chunks = [msg[i:i + CHUNK] for i in range(0, len(msg), CHUNK)]
+total = len(chunks)
+pkts = [None] + [make_pkt(2, i + 1, c) for i, c in enumerate(chunks)]
+
+# 2. Gửi START (seq 0), chờ ACK
+s.sendto(make_pkt(0, 0), addr)
+while recv_ack(s, time.time() + TIMEOUT) is None:
+    s.sendto(make_pkt(0, 0), addr)
+
+# 3. Sliding window + selective ACK
+base, nxt = 1, 1
+acked = set()                          # các gói đã được ACK
+deadline = time.time() + TIMEOUT
+while base <= total:
+    while nxt < base + W and nxt <= total:
+        s.sendto(pkts[nxt], addr)
+        nxt += 1
+    h = recv_ack(s, deadline)
+    if h is None:                      # timeout: chỉ gửi lại gói CHƯA được ACK
+        for i in range(base, nxt):
+            if i not in acked:
+                s.sendto(pkts[i], addr)
+        deadline = time.time() + TIMEOUT
+    elif base <= h.seq_num < nxt:      # ACK của một gói trong cửa sổ
+        acked.add(h.seq_num)
+        old = base
+        while base in acked:           # trượt cửa sổ qua các gói đã ACK
+            base += 1
+        if base > old:                 # cửa sổ tiến lên thì reset timer
+            deadline = time.time() + TIMEOUT
+
+# 4. Gửi END, chờ ACK tối đa 500 ms
+s.sendto(make_pkt(1, total + 1), addr)
+recv_ack(s, time.time() + TIMEOUT)
